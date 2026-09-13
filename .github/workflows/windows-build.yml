@@ -1,0 +1,110 @@
+name: Build Windows x64
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Windows x64 / MSVC 2022 / Qt 6.11.2
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Detect project directory
+        shell: pwsh
+        run: |
+          if (Test-Path "CMakeLists.txt") {
+            $source = "."
+          }
+          elseif (Test-Path "PDFReader_Phase1/CMakeLists.txt") {
+            $source = "PDFReader_Phase1"
+          }
+          else {
+            Write-Host "Repository files found:"
+            Get-ChildItem -Force
+            throw "CMakeLists.txt was not found at repository root or PDFReader_Phase1/. Upload the project files first."
+          }
+
+          "SOURCE_DIR=$source" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Using project source directory: $source"
+
+      - name: Install Qt 6.11.2
+        uses: jurplel/install-qt-action@v4.3.1
+        with:
+          version: '6.11.2'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2022_64'
+          cache: 'false'
+          setup-python: 'true'
+
+      - name: Show tool versions
+        shell: pwsh
+        run: |
+          cmake --version
+          Write-Host "QT_ROOT_DIR=$env:QT_ROOT_DIR"
+          if (Get-Command qmake -ErrorAction SilentlyContinue) { qmake --version }
+          if (Get-Command windeployqt -ErrorAction SilentlyContinue) { windeployqt --version }
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -S "$env:SOURCE_DIR" -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --parallel
+
+      - name: Locate executable
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "build/Release/PDFReader.exe",
+            "build/PDFReader.exe"
+          )
+
+          $exe = $null
+          foreach ($candidate in $candidates) {
+            if (Test-Path $candidate) {
+              $exe = (Resolve-Path $candidate).Path
+              break
+            }
+          }
+
+          if (-not $exe) {
+            Write-Host "Build tree:"
+            Get-ChildItem build -Recurse -File | Select-Object FullName
+            throw "PDFReader.exe was not produced."
+          }
+
+          "PDFREADER_EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Executable: $exe"
+
+      - name: Prepare portable Windows package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item "$env:PDFREADER_EXE" "package/PDFReader.exe" -Force
+          windeployqt --release --no-translations --compiler-runtime "package/PDFReader.exe"
+
+      - name: Create ZIP package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "package/*" -DestinationPath "PDFReader-Windows-x64.zip" -Force
+          Get-Item "PDFReader-Windows-x64.zip" | Format-List Name,Length,FullName
+
+      - name: Upload Windows x64 build
+        uses: actions/upload-artifact@v7
+        with:
+          name: PDFReader-Windows-x64
+          path: PDFReader-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
